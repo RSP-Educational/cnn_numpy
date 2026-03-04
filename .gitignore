@@ -210,3 +210,4 @@ __marimo__/
 /.vscode
 /data
 .DS_Store
+test.py

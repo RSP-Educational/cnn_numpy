@@ -3,6 +3,7 @@ import gzip
 import functools
 import operator
 import numpy as np
+import cv2 as cv
 import array
 import struct
 from urllib.parse import urljoin
@@ -58,6 +59,153 @@ def compute_accuracy(y_hat:np.ndarray, y:np.ndarray):
     y_labels = np.argmax(y, axis=1)
     accuracy = np.mean(y_hat_labels == y_labels)
     return accuracy
+
+class CornersAndEdgesDataset():
+    LABELS = [
+        'Corner TL',
+        'Corner TR',
+        'Corner BL',
+        'Corner BR',
+        'H Edge TB',
+        'H Edge BT',
+        'V Edge LR',
+        'V Edge RL'
+    ]
+    def __init__(
+            self,
+            batch_size:int = 1,
+            num_samples:int = 1000,
+            image_size:int = 28,
+            augment:bool = False,
+            max_shift:int = 0,
+            noise_std:float = 0.0,
+            blur_prob:float = 0.0,
+            contrast_jitter:float = 0.0,
+            brightness_jitter:float = 0.0,
+            seed:int | None = None
+    ):
+        self.batch_size = batch_size
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.augment = augment
+        self.max_shift = max_shift
+        self.noise_std = noise_std
+        self.blur_prob = blur_prob
+        self.contrast_jitter = contrast_jitter
+        self.brightness_jitter = brightness_jitter
+        self.rng = np.random.default_rng(seed)
+        self.index = 0
+
+        self.images, self.labels = self._generate_data()
+
+    def _augment_image(self, image:np.ndarray):
+        augmented = image.copy().astype(np.float32)
+
+        if self.max_shift > 0:
+            dx = int(self.rng.integers(-self.max_shift, self.max_shift + 1))
+            dy = int(self.rng.integers(-self.max_shift, self.max_shift + 1))
+            transform = np.float32([[1, 0, dx], [0, 1, dy]])
+            augmented = cv.warpAffine(
+                augmented,
+                transform,
+                (self.image_size, self.image_size),
+                flags=cv.INTER_NEAREST,
+                borderMode=cv.BORDER_CONSTANT,
+                borderValue=0
+            )
+
+        if self.blur_prob > 0 and self.rng.random() < self.blur_prob:
+            augmented = cv.GaussianBlur(augmented, (3, 3), 0.8)
+
+        if self.contrast_jitter > 0:
+            alpha = float(self.rng.uniform(1.0 - self.contrast_jitter, 1.0 + self.contrast_jitter))
+            augmented = augmented * alpha
+
+        if self.brightness_jitter > 0:
+            beta = float(self.rng.uniform(-self.brightness_jitter, self.brightness_jitter))
+            augmented = augmented + beta
+
+        if self.noise_std > 0:
+            noise = self.rng.normal(0.0, self.noise_std, size=augmented.shape).astype(np.float32)
+            augmented = augmented + noise
+
+        augmented = np.clip(augmented, 0.0, 1.0)
+        return augmented
+
+    def _generate_data(self):
+        images = np.zeros((len(self.LABELS), 1, self.image_size, self.image_size), dtype=np.float32)
+        labels = np.arange(0, len(self.LABELS))
+
+        def corner(rotation:int):
+            img = np.zeros((self.image_size, self.image_size), dtype=np.float32)
+            cv.rectangle(img, (self.image_size//2, self.image_size//2), (self.image_size, self.image_size), 1, -1)
+            #pts = np.array([[0, 0], [self.image_size, 0], [self.image_size, self.image_size//2], [self.image_size//2, self.image_size//2], [self.image_size//2, self.image_size], [0, self.image_size]])
+            #cv.fillPoly(img, [pts], 1)
+            if rotation == 90:
+                img = cv.rotate(img, cv.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                img = cv.rotate(img, cv.ROTATE_180)
+            elif rotation == 270:
+                img = cv.rotate(img, cv.ROTATE_90_COUNTERCLOCKWISE)
+            return img
+        
+        def edge(rotation:int):
+            img = np.zeros((self.image_size, self.image_size), dtype=np.float32)
+            cv.rectangle(img, (0, 0), (self.image_size, self.image_size//2-1), 1, -1)
+
+            if rotation == 90:
+                img = cv.rotate(img, cv.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                img = cv.rotate(img, cv.ROTATE_180)
+            elif rotation == 270:
+                img = cv.rotate(img, cv.ROTATE_90_COUNTERCLOCKWISE)
+            return img
+
+        for i in range(len(self.LABELS)):
+            label = labels[i]
+            if label == 0:  # Corner TL
+                images[i, 0] = corner(rotation=180)
+            elif label == 1:  # Corner TR
+                images[i, 0] = corner(270)
+            elif label == 2:  # Corner BL
+                images[i, 0] = corner(90)
+            elif label == 3:  # Corner BR
+                images[i, 0] = corner(0)
+            elif label == 4:  # Horizontal Edge TB
+                images[i, 0] = edge(rotation=0)
+            elif label == 5:  # Horizontal Edge BT
+                images[i, 0] = edge(rotation=180)
+            elif label == 6:  # Vertical Edge LR
+                images[i, 0] = edge(rotation=270)
+            elif label == 7:  # Vertical Edge RL
+                images[i, 0] = edge(rotation=90)
+
+        return images - 0.5, labels
+    
+    def __len__(self):
+        return self.num_samples // self.batch_size
+    
+    def __getitem__(self, index):
+        indices = np.random.choice(len(self.images), self.batch_size, replace=True)
+        images = self.images[indices].copy()
+        labels = self.labels[indices]
+
+        if self.augment:
+            for i in range(images.shape[0]):
+                images[i, 0] = self._augment_image(images[i, 0])
+
+        return images, labels
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.index >= len(self):
+            self.index = 0
+            raise StopIteration
+        batch = self.__getitem__(self.index)
+        self.index += 1
+        return batch
 
 class IdxDecodeError(ValueError):
     """Raised when an invalid idx file is parsed."""
@@ -208,6 +356,9 @@ class MNISTDataset():
         np.random.shuffle(self.sample_indices)
         self.index = 0
 
+    def __getitem__(self, index):
+        return self.images[index], self.labels[index]
+
     def __len__(self):
         return len(self.images) // self.batch_size
 
@@ -227,5 +378,9 @@ class MNISTDataset():
         return images, labels
     
 if __name__ == "__main__":
-    ds_train = MNISTDataset(split = 'train')
+    ds_train = CornersAndEdgesDataset(batch_size=4, num_samples=100)
+
+    for X, Y in ds_train:
+        #print(X.shape, Y.shape
+        pass
     pass

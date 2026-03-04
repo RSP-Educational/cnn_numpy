@@ -4,7 +4,7 @@ from pathlib import Path
 
 COLORS = {
     'train': 'blue',
-    'val': 'orange',
+    'val': 'red',
     'test': 'green'
 }
 
