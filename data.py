@@ -188,7 +188,7 @@ class CornersAndEdgesDataset():
     def __getitem__(self, index):
         indices = np.random.choice(len(self.images), self.batch_size, replace=True)
         images = self.images[indices].copy()
-        labels = self.labels[indices]
+        labels = self.labels[indices].copy()
 
         if self.augment:
             for i in range(images.shape[0]):
