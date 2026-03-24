@@ -211,3 +211,5 @@ __marimo__/
 /data
 .DS_Store
 test.py
+main.html
+main.pdf
